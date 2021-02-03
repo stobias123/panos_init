@@ -3,52 +3,74 @@ package main
 import (
     "flag"
     "log"
-    "os"
+    "strings"
+    "time"
 
     "github.com/PaloAltoNetworks/pango"
+    "github.com/PaloAltoNetworks/pango/commit"
 )
 
 func main() {
     var (
-        hostname, username, password, apikey, comment string
-        ok bool
-        err error
-        job uint
+        err                                                      error
+        configFile, hostname, username, password, apiKey, admins string
+        edan, eso, epao, force                                   bool
+        jobId                                                    uint
+        sleep                                                    int64
     )
 
     log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 
-    if hostname, ok = os.LookupEnv("PANOS_HOSTNAME"); !ok {
-        log.Fatalf("PANOS_HOSTNAME must be set")
-    }
-    apikey = os.Getenv("PANOS_API_KEY")
-    if username, ok = os.LookupEnv("PANOS_USERNAME"); !ok && apikey == "" {
-        log.Fatalf("PANOS_USERNAME must be set if PANOS_API_KEY is unset")
-    }
-    if password, ok = os.LookupEnv("PANOS_PASSWORD"); !ok && apikey == "" {
-        log.Fatalf("PANOS_PASSWORD must be set if PANOS_API_KEY is unset")
-    }
-
-    flag.StringVar(&comment, "c", "", "Commit comment")
+    flag.StringVar(&configFile, "config", "", "JSON config file with panos connection info")
+    flag.StringVar(&hostname, "host", "", "PAN-OS hostname")
+    flag.StringVar(&username, "user", "", "PAN-OS username")
+    flag.StringVar(&password, "pass", "", "PAN-OS password")
+    flag.StringVar(&apiKey, "key", "", "PAN-OS API key")
+    flag.StringVar(&admins, "admins", "", "CSV of specific admins for partial config commit")
+    flag.BoolVar(&edan, "exclude-device-and-network", false, "Exclude device and network")
+    flag.BoolVar(&eso, "exclude-shared-objects", false, "Exclude shared objects")
+    flag.BoolVar(&epao, "exclude-policy-and-objects", false, "Exclude policy and objects")
+    flag.BoolVar(&force, "force", false, "Force a commit even if one isn't needed")
+    flag.Int64Var(&sleep, "sleep", 1, "Seconds to sleep between checks for commit completion")
     flag.Parse()
 
+    // Connect to the firewall.
     fw := &pango.Firewall{Client: pango.Client{
         Hostname: hostname,
         Username: username,
         Password: password,
-        ApiKey: apikey,
-        Logging: pango.LogOp | pango.LogAction,
+        ApiKey:   apiKey,
+        Logging:  pango.LogOp | pango.LogAction,
     }}
-    if err = fw.Initialize(); err != nil {
+    if err = fw.InitializeUsing(configFile, true); err != nil {
         log.Fatalf("Failed: %s", err)
     }
 
-    job, err = fw.Commit(comment, true, true, false, true)
+    // Build the commit to be performed.
+    cmd := commit.FirewallCommit{
+        Description:             flag.Arg(0),
+        ExcludeDeviceAndNetwork: edan,
+        ExcludeSharedObjects:    eso,
+        ExcludePolicyAndObjects: epao,
+        Force:                   force,
+    }
+    admins = strings.TrimSpace(admins)
+    if admins != "" {
+        cmd.Admins = strings.Split(admins, ",")
+    }
+
+    sd := time.Duration(sleep) * time.Second
+
+    // Perform the commit
+    jobId, _, err = fw.Commit(cmd, "", nil)
     if err != nil {
         log.Fatalf("Error in commit: %s", err)
-    } else if job == 0 {
+    } else if jobId == 0 {
         log.Printf("No commit needed")
+    } else if err = fw.WaitForJob(jobId, sd, nil); err != nil {
+        log.Printf("Error in commit: %s", err)
     } else {
         log.Printf("Committed config successfully")
     }
 }
+
